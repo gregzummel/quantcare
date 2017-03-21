@@ -1,0 +1,644 @@
+---
+title: "BHS_Master_Code"
+author: "Operation_Research_BHS_Group"
+date: "December 3, 2016"
+output: pdf_document
+---
+
+Import data:
+
+```{r}
+bhs= read.csv(file.choose(), header = TRUE)
+```
+
+#Add Specialist Column - Ben Solis-Cohen
+```{r}
+# All this code is to construct "specs_dict" (see below)
+# Specs_dict maps nfh_specialist names to categories like diabetes, diet, and other
+bhs2 = bhs
+specs = read.csv("NFH Specialists.csv", header = TRUE)
+leftout = setdiff(trimws(unique(bhs2$NFH_Resource[bhs2$NFH_Resource != ""])),trimws(specs[,1]))
+spec_rownames = c(as.character(specs[,1]),leftout)
+specs_dict = c(as.character(specs[,2]),rep("other",length(leftout)))
+names(specs_dict) = spec_rownames
+
+# Constructed specs_dict. Now apply to NFH_Resource row to transform names to specialties
+bhs2$NFHSpecialist = specs_dict[trimws(bhs2$NFH_Resource)]
+bhs = bhs2
+```
+
+#Convert ICD-9 to ICD-10 - Ben Solis-Cohen
+```{r message=FALSE,eval, FALSE}
+### Install pakcages needed for icd conversion.
+### Might need to uncomment some lines if you haven't run them already
+### Note that you only need to "install" once but need to require/library 
+### every time you open a new session
+#install.packages("devtools")
+library(devtools) 
+#devtools::install_github("wtcooper/icdcoder")
+library(icdcoder)
+require(devtools)
+require(dplyr)
+require(data.table)
+library(icd)
+```
+
+```{r,eval = FALSE}
+## This code converts all ICD-9 codes to ICD-10 and leaves ICD-10 codes as-is
+## Note that the conversion is time-consuming. Don't be surprised if it's taking a long time
+for (i in 1:63){
+  print(i)
+  newDX = matrix(nrow = nrow(bhs),ncol = 1)
+  for(j in 1:nrow(bhs2)){ 
+    to_convert = bhs[,paste("DX",as.character(i),sep = "")][j]
+    icd10_short = as.character(convICD(to_convert, "icd9")[1,2])
+    if(is.na(icd10_short)){
+      res = as.character(icd_decimal_to_short(to_convert))
+    }else{
+      res = icd10_short
+    }
+    newDX[j,1] = res
+  }
+  bhs[,paste("DX",as.character(i),sep = "")] = newDX
+}
+```
+
+#Introduce DXiName{1,2,3} vars - Ben Solis-Cohen
+```{r,message = FALSE}
+library(icd)
+```
+
+Below is function to go up the ICD-10 tree using icd10cm2016 table. "s" specifies level to go up. "s" = 6,7,8 are used. See icd10cm2016. "s" is used to index the COLUMNS.
+```{r,eval = FALSE}
+getA = function (icd10_short,s) {
+  res = (as.character(unlist(
+    icd10cm2016[which(icd10cm2016$code == icd10_short),][s]
+    )))
+  if(identical(res,character(0))){
+    return ("NA")
+  }else{
+    return (res)
+  }
+}
+```
+
+```{r,eval=FALSE}
+# Introduces DXiName{1,2,3} vars for DX1-DX63 
+# Should be using tree compression instead!
+bhs2 = bhs
+for(i in 1:63){
+  print(i)
+  #s for specificity
+  for(s in 7:8){
+    newDXName = matrix(nrow = nrow(bhs),ncol = 1)
+    for(j in 1:nrow(bhs2)){
+      to_convert = bhs[,paste("DX",as.character(i),sep = "")][j]
+      newDX[j,1] = getA(to_convert,s)
+    }
+    bhs2[,paste("DX",as.character(i),"Name",as.character(s-5),sep = "")] = newDX
+  }
+}
+bhs = bhs2
+```
+
+# Add NFH services - Hallee Wong
+## Function to record number of specialist encounters for each patient (looking forward from a specific hospital discharge)
+```{r}
+add_specialists = function (data){ 
+    
+    #Reorder data by patient ID
+    data <- data[order(data$UnitNumber,data$DischargeDateTime),]
+    
+    #Create zero columns for NFH specialist info
+    data$NFH_total <- as.numeric(0)
+    data$NFH_nav <- as.numeric(0)
+    data$NFH_worker <- as.numeric(0)
+    data$NFH_psych <- as.numeric(0)
+    data$NFH_bh <- as.numeric(0)
+    data$NFH_gmed <- as.numeric(0)
+    data$NFH_chf <- as.numeric(0)
+    data$NFH_diabetes <- as.numeric(0)
+    data$NFH_diet <- as.numeric(0)
+    data$NFH_day <- as.numeric(0)
+    data$NFH_tobacco <- as.numeric(0)
+    data$NFH_other <- as.numeric(0)
+    data$keep <- as.numeric(0)
+  
+    i = 1
+    
+  while (i <= nrow(data)){
+      print(i)
+      currentID = trimws(data$UnitNumber[i])
+      currentDATE = trimws(data$DischargeDateTime[i])
+      data$keep[i] = 1 
+
+      #Find all rows with the same patient ID and discharge date
+      j = i
+      
+      while (trimws(data$UnitNumber[j]) == currentID && 
+             trimws(data$DischargeDateTime[j]) == currentDATE && j <= nrow(data)){
+
+        if ((trimws(data$NFH_Resource[j]) != '')){
+
+            if (trimws(data$NFH_Resource[j]) == 'GASPKA'
+                ||trimws(data$NFH_Resource[j]) == 'ACCEKR'){
+              #print('GASPKA')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_nav[i] <- data$NFH_nav[i] + 1 
+              }
+              
+            else if (trimws(data$NFH_Resource[j]) == 'PIANEL'){
+              #print('PIANEL')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_worker[i] <- data$NFH_worker[i] + 1
+              }
+              
+            else if (trimws(data$NFH_Resource[j]) == 'CARTJE'){
+              #print('CARTJE')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_psych[i] <- data$NFH_psych[i] + 1
+              }
+              
+            else if (trimws(data$NFH_Resource[j]) == 'UPSOVI'){
+              #print('UPSOVI')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_bh[i] <- data$NFH_bh[i] + 1
+              }
+            
+            else if (trimws(data$NFH_Resource[j]) == 'GEYERA'){
+              #print('GEYERA')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_gmed[i] <- data$NFH_gmed[i] + 1
+              }
+              
+            else if (trimws(data$NFH_Resource[j]) == 'EMERAL'
+                ||trimws(data$NFH_Resource[j]) == 'GILVBR'){
+              #print('EMandGI')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_chf[i] <- data$NFH_chf[i] + 1
+              }
+              
+            else if (trimws(data$NFH_Resource[j]) == 'SALZJA'
+                ||trimws(data$NFH_Resource[j]) == 'JOLIJI'){
+              #print('SAandJo')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_diabetes[i] <- data$NFH_diabetes[i] + 1
+              }
+              
+            else if (trimws(data$NFH_Resource[j]) == 'NELSMA'){
+              #print('NELSMA')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_diet[i] <- data$NFH_diet[i] + 1
+              }
+              
+            else if (trimws(data$NFH_Resource[j]) == 'GOLKCA'){
+              #print('GOLKCA')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_day[i] <- data$NFH_day[i] + 1
+              }
+              
+            else if (trimws(data$NFH_Resource[j]) == 'AHLIMA'){
+              #print('AHLIMA')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_tobacco[i] <- data$NFH_tobacco[i] + 1
+              }
+            
+            else if (trimws(data$NFH_Resource[j]) != ''){
+              #print('OTHER')
+              data$NFH_total[i] <- data$NFH_total[i] + 1
+              data$NFH_other[i] <- data$NFH_other[i] + 1
+              }
+            
+        };
+        j = j + 1;
+        
+      };
+      i = j;   
+    }
+    return(data)
+}
+```
+
+```{r}
+bhs = add_specialists(bhs)
+# remove keep == 1 rows (rows that are duplicate discharges)
+# These rows only differ by NFH/Education visits and we record
+# much of this information in the variables created above.
+# However, more could be done in the way of recording *pre-discharge*
+# NFH and education visits (as apposed to post-discharge recorded above)
+bhs = subset(bhs, keep == 1)
+```
+
+##Tree Compression Algorithm - Ben & Inte
+```{r}
+# Quickly put together. We could think about consolidating into a loop. 
+# Algorithm: 
+## - Goal: Assure that each disease has a population greater than thresh
+## - Method: Group together diseases under the same ancestor in the ICD-10 tree
+#### 1) For each ICD-10 code at the most specific level (in the dataset), 
+        # If the disease has a population greater than thresh, add to sigDis list
+        # Otherwise, add parent to next level list
+#### Apply (1) to next level recursively
+
+library(icd)
+library(data.table)
+
+SigDis=c()
+thresh=40
+
+icdtable=icd10cm2016
+row.names(icdtable)=icdtable[,"code"]
+
+level1=table(bhsTree$DX1)
+level1[1]=100  # don't want empty strings! Ask Ben/Inte
+level2=rep(0,nrow(level1)) #generally size of prev level
+names(level2)=rep("none",nrow(level1)) #generally size of prev level
+
+idX=1
+for (i in 2:length(level1)){
+  count1=level1[i]
+  
+  if (count1<thresh){
+    parent= as.character(icdtable[names(level1)[i],"major"])
+    
+    if (!(parent %in% names(level2))){ #new parent
+      names(level2)[idX]=parent
+      level2[parent]=count1
+      idX=idX+1
+    } else {
+      level2[parent]=level2[parent]+count1
+    }
+  }else{
+    disName=icdtable[names(level1)[i],"short_desc"]
+    SigDis=c(SigDis,disName)
+  }
+}
+
+level2=level2[which(names(level2) !="none")]
+
+
+newtable=as.data.table(icdtable)
+icdtable=newtable[,lapply(.SD,function(x){x[1]}),by="major"]
+icdtable=as.matrix(icdtable)
+row.names(icdtable)=icdtable[,"major"]
+
+level3=rep(0,length(level2)) #generally size of prev level
+names(level3)=rep("none",length(level2)) #generally size of prev level
+
+
+idX=1
+for (i in 1:length(level2)){
+  count1=level2[i]
+  
+  if (count1<thresh){
+    parent= as.character(icdtable[names(level2)[i],"sub_chapter"])
+    
+    if (!(parent %in% names(level3))){ #new parent
+      names(level3)[idX]=parent
+      level3[parent]=count1
+      idX=idX+1
+    } else {
+      level3[parent]=level3[parent]+count1
+    }
+  }else{
+    SigDis=c(SigDis,names(level2)[i])
+  }
+}
+
+level3=level3[which(names(level3) !="none")]
+
+newtable=as.data.table(icdtable)
+icdtable=newtable[,lapply(.SD,function(x){x[1]}),by="sub_chapter"]
+icdtable=as.matrix(icdtable)
+row.names(icdtable)=icdtable[,"sub_chapter"]
+
+level4=rep(0,length(level3)) #generally size of prev level
+names(level4)=rep("none",length(level3)) #generally size of prev level
+
+
+idX=1
+for (i in 1:length(level3)){
+  count1=level3[i]
+  
+  if (count1<thresh){
+    parent= as.character(icdtable[names(level3)[i],"chapter"])
+    
+    if (!(parent %in% names(level4))){ #new parent
+      names(level4)[idX]=parent
+      level4[parent]=count1
+      idX=idX+1
+    } else {
+      level4[parent]=level4[parent]+count1
+    }
+  }else{
+    SigDis=c(SigDis,names(level3)[i])
+  }
+}
+
+level4=level4[which(names(level4) !="none")]
+
+other=rep(0,length(level4))
+names(other)=rep("none",length(level4))
+
+idX=1
+for (i in 1:length(level4)){
+  disease=names(level4)[i]
+  count=level4[i]
+  if (count<20){
+    other[idX]=count
+    names(other)[idX]=disease
+    idX=idX+1
+  }else{
+    SigDis=c(SigDis,names(level4)[i])
+  }
+}
+other=other[which(names(other) !="none")]  
+  
+print(SigDis)
+print(other)
+```
+
+```{r}
+# Helper function for tree compression algorithm
+# Finds the least common ancestor of the disease with count greater than 40. 
+# Requires preprocessing of tree compression algorithm to create sigDis. 
+findLCA = function(disName,sigDis,icdtable){
+  
+  thisRow=icdtable[disName,]
+  disName=thisRow[1,"short_desc"]
+  
+  if (disName %in% sigDis){
+    return (disName)
+  }
+  disName=thisRow[1,"major"]  
+  
+  if (disName %in% sigDis){
+    return (disName)
+  }
+  disName=thisRow[1,"sub_chapter"]
+  
+  if (disName %in% sigDis){
+    return (disName)
+  }
+  disName=thisRow[1,"chapter"]
+  
+  if (disName %in% sigDis){
+    return(disName)
+  }
+  return("Other")
+}
+```
+
+```{r}
+## Wrapper Code to call LCAFinder
+## End product is bhs#DX1NameAgg, which is bhs$DX1 where each disease has been
+## converted to it's least common ancestor in the ICD-10 tree with population > thresh
+icdtable=icd10cm2016
+row.names(icdtable)=icdtable[,"code"]
+x=apply(as.matrix(bhs$DX1),1,function(disName){return(as.character(findLCA(disName,SigDis,icdtable)))})
+bhs$DX1NameAgg=x
+```
+
+#Making 'Previous Visits' Variables - Ben Solis-Cohen
+For each admission, starting at the last one, iterate up through the other admissions (backwards in time). If a discharge date is within 30 days of the current admission, increment PrevAdmits30. Otherwise, increment PrevAdmitsTot (**which is actually number of previous admissions before 30**). Also, added variable for *same* primary diagnosis. 
+```{r}
+bhs = read.csv(file.choose())
+```
+
+```{r,eval = FALSE}
+# This runs with hallee's code already run (keep == 0 columns dropped)
+# Copy bhs into bhs2 and sort by admit date
+bhs2 = bhs
+bhs2 = bhs2[order(bhs$UnitNumber,as.POSIXct(as.character(bhs2$AdmitDateTime), format = "%m/%d/%Y %H:%M")),]
+bhs2$NFHSpecialist = trimws(bhs2$NFHSpecialist)
+
+#New blank columns
+prevAdmitsTotCol30 = matrix(0,ncol = 1, nrow = nrow(bhs))
+prevAdmitsSameCol30 = matrix(0,ncol = 1, nrow = nrow(bhs))
+prevAdmitsTotCol = matrix(0,ncol = 1, nrow = nrow(bhs))
+prevAdmitsSameCol = matrix(0,ncol = 1, nrow = nrow(bhs))
+#Go until second row (first has no previous admits...)
+for(curIndex in nrow(bhs2):2){
+  print(curIndex)
+  curAdmitDate = as.POSIXct(as.character(bhs2$AdmitDateTime[curIndex]), format = "%m/%d/%Y %H:%M")
+  curID = bhs2$UnitNumber[curIndex]
+  curDisease = bhs2$DX1[curIndex]
+  
+  checkIndex = curIndex - 1
+  checkDischDate = as.POSIXct(as.character(bhs2$DischargeDateTime[checkIndex]), format = "%m/%d/%Y %H:%M")
+  checkID = bhs2$UnitNumber[checkIndex]
+  checkDisease = bhs2$DX1[checkIndex]
+  
+  numAdmissions30 = 0
+  sameAdmissions30 = 0
+  numAdmissions = 0
+  sameAdmissions = 0
+  while(checkIndex >= 1 && checkID == curID ){
+
+    if(curAdmitDate < checkDischDate){
+      print("Should never get here if rows have been dropped")
+      checkIndex = checkIndex - 1
+      checkID = bhs$UnitNumber[checkIndex]
+      checkDisease = bhs2$DX1[checkIndex]
+      checkDischDate = as.POSIXct(as.character(bhs2$DischargeDateTime[checkIndex]), format = "%m/%d/%Y %H:%M")
+      next
+    }
+
+    if(as.numeric(difftime(curAdmitDate,checkDischDate,units = "days")) <= 30){
+      numAdmissions30 = numAdmissions30 + 1
+      if(checkDisease == curDisease){
+        sameAdmissions30 = sameAdmissions30 + 1
+      }
+    }else{
+      numAdmissions = numAdmissions + 1
+      if(checkDisease == curDisease){
+        sameAdmissions = sameAdmissions + 1
+      }
+    }
+      
+    checkIndex = checkIndex - 1
+    checkID = bhs$UnitNumber[checkIndex]
+    checkDisease = bhs2$DX1[checkIndex]
+    checkDischDate = as.POSIXct(as.character(bhs2$DischargeDateTime[checkIndex]), format = "%m/%d/%Y %H:%M")
+    
+  }
+  
+  prevAdmitsSameCol30[curIndex] = sameAdmissions30
+  prevAdmitsTotCol30[curIndex] = numAdmissions30
+  prevAdmitsSameCol[curIndex] = sameAdmissions
+  prevAdmitsTotCol[curIndex] = numAdmissions
+}
+
+bhs2[,"PrevAdmits30"] = prevAdmitsTotCol30
+bhs2[,"PrevAdmitsSame30"] = prevAdmitsSameCol30
+bhs2[,"PrevAdmitsTot"] = prevAdmitsTotCol
+bhs2[,"PrevAdmitsSameTot"] = prevAdmitsSameCol
+View(bhs2)
+```
+
+```{r}
+bhs = bhs2
+```
+
+#Seasonality
+```{r}
+# Bins an admission into one of periods bins based on AdmitDateTime (this just returns the bin number)
+get_season_bin = function(date, periods){
+  return(floor(as.POSIXlt(as.character(date), format = "%m/%d/%Y %H:%M")$yday/365*periods))
+}
+```
+
+```{r}
+# Uses get_season_bin to bin admissions in to season bin
+# Each split in splits is the number of divisions in the year 
+# (4 yields 4 divisions --> 3 month periods and 12 --> monthly divisions)
+splits = c(4,6,12)
+for(split in splits){
+  split_fun = function(date){return(get_season_bin(date,split))}
+  bhs[,paste("season",split,sep = "")] = apply(matrix(bhs$AdmitDateTime),1,split_fun)
+}
+```
+
+#Binary Variable for Readmission within 30/60 days - Intekhab Hossain
+```{r}
+# Helper function to calculate date difference used in calculation of 30-day readmission variable
+dateMinus <- function(later,prev) { 
+  as.numeric(difftime(later,prev,units = "days")) 
+}
+```
+
+```{r}
+bhs = bhs[order(bhs$UnitNumber,as.POSIXct(as.character(bhs$AdmitDateTime), format = "%m/%d/%Y %H:%M")),]
+
+bhs$admittedIn30=rep(0,nrow(bhs))
+bhs$admittedIn60=rep(0,nrow(bhs))
+for (i in 1:(nrow(bhs))){
+  print(i)
+  thisRow=bhs[i,] 
+  thisID=thisRow['UnitNumber']
+  thisAdmit=as.POSIXct(as.character(thisRow[['AdmitDateTime']]), format = "%m/%d/%Y %H:%M") 
+  thisDischarge=as.POSIXct(as.character(thisRow[['DischargeDateTime']]), format = "%m/%d/%Y %H:%M") 
+  for (j in i+1:nrow(bhs)){ 
+    testRow=bhs[j,] 
+    testID=testRow['UnitNumber']
+    testAdmit=as.POSIXct(as.character(testRow[['AdmitDateTime']]), format = "%m/%d/%Y %H:%M") 
+    testDischarge=as.POSIXct(as.character(testRow[['DischargeDateTime']]), format = "%m/%d/%Y %H:%M")
+    if (testID==thisID){
+      if(dateMinus(testAdmit,thisAdmit)>0 & dateMinus(testDischarge,thisDischarge)>0){
+        #print(paste(as.Date(thisAdmit)," ",as.Date(thisDischarge)," ",as.Date(testAdmit)," ",as.Date(testDischarge)," ",dateMinus(testAdmit,thisDischarge)))
+      
+      if(dateMinus(testAdmit,thisDischarge)>0 & dateMinus(testAdmit,thisDischarge)<=30){
+        bhs[i,]$admittedIn30=1 
+        print("Found a 30-day readmit! YUS!")
+        }
+      if(dateMinus(testAdmit,thisDischarge)>0 & dateMinus(testAdmit,thisDischarge)<=60){ 
+        bhs[i,]$admittedIn60=1
+        print("Found a 60-day readmit! YUS!")
+        }
+      }
+    }
+    else{
+      break
+      }
+  }
+  }
+```
+
+# Transform secondary diagnoses to indicator variables
+```{r}
+# This function gets all secondary diseases with a given specificity (icd-10 level)
+# This should be generalized to just use the tree compression algorithm instead of
+# hard-coding a specificity (spec) for ALL diseases. 
+getAllDiseases = function(df,spec){
+    allDiseases = c()
+    for(i in 2:63){
+      curDiseases = unique(bhs[,paste("DX",i,"Name",spec,sep = "")])
+      allDiseases = union(allDiseases,curDiseases)
+    }
+    return(allDiseases[allDiseases!='NA'])
+}
+```
+
+```{r}
+# Create secondary disease columns
+# Each patient gets a 1 if they have that disease and 0 if not
+allDiseases = getAllDiseases(bhs,3)
+secDiseaseMat = matrix(0,nrow = nrow(bhs),ncol = length(allDiseases))
+colnames(secDiseaseMat) = allDiseases
+
+for(i in 1:nrow(bhs)){
+  print(i)
+  for(j in 2:63){
+    if(!is.na(bhs[i,paste("DX",j,"Name3", sep = "")]) && trimws(bhs[i,paste("DX",j,"Name3", sep = "")]) != "NA"){
+      secDiseaseMat[i,bhs[i,paste("DX",j,"Name3", sep = "")]] = 1
+    }
+  }
+}
+```
+
+# Adding Sessler Indices
+```{r}
+# Just converts from icd10 to icd9 and appends a D so that the code is 
+# readable by icd9cm_sessler_rsi
+icd10_to_9 = function(icd10_code){
+  return(paste("D",convICD(icd10_code, "icd10")[1,2],sep = ""))
+}
+```
+
+```{r}
+# Create 4 columns "rsi_1yrpod","rsi_30dlos","rsi_30dpod", and "rsi_inhosp"
+# These are sessler scores, which correpond to different types of risk. 
+# See medicalrisk package documentation package and google sessler index
+# for more information
+
+store=matrix(nrow=nrow(bhs),ncol=4)
+colnames(store)=c("rsi_1yrpod","rsi_30dlos","rsi_30dpod","rsi_inhosp")
+
+patientDiseases=c()
+for (i in 1:63){
+  patientDiseases=c(patientDiseases,paste("DX",i,sep=""))  
+}
+
+for (i in 1:nrow(bhs)){
+  print(i)
+  patientDiseases=as.matrix(bhs[i,patientDiseases])
+  # remove blanks and NAs
+  patientDiseases = patientDiseases[which(sec != '' & !is.na(sec))]
+  # Convert to "D" + icd9 version so icd9cm_sessler_rsi can read
+  patientDiseases = sapply(patientDiseases,icd10_to_9,USE.NAMES = F)
+  if(length(patientDiseases) != 0){
+    # append the 4 sessler scores for this patient
+    scores=icd9cm_sessler_rsi(patientDiseases)
+    store[i,]=as.matrix(scores)
+  }
+} 
+bhs=cbind(bhs,store)
+```
+
+## Length of Stay
+```{r,eval = FALSE}
+# Add length of stay column
+bhs$LOS = difftime(as.POSIXct(bhs$DischargeDateTime, format = "%m/%d/%Y %H:%M"),as.POSIXct(bhs$AdmitDateTime,format = "%m/%d/%Y %H:%M"), units = "days")
+```
+
+```{r, eval = FALSE}
+# Remove columns no longer needed
+# Mostly used for variable creation
+# We have hopefully already encoded this information by now
+# in a more concise way. 
+bhs = cbind(bhs,secDiseaseMat)
+rem_cols = c()
+for(i in 2:63){
+  for(j in 1:3){
+    rem_cols = c(rem_cols,paste("DX",i,"Name",j,sep=""))
+  }
+  rem_cols = c(rem_cols,paste("DX",i,sep=""))
+  rem_cols = c(rem_cols,paste("DX",i,"Name",sep =""))
+}
+bhs <- bhs[,!(names(bhs)) %in% rem_cols]
+```
+
+```{r}
+write.csv(bhs,"final_data_1.csv")
+```
+
